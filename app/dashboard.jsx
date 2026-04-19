@@ -1,5 +1,9 @@
-import { useState, useRef } from 'react';
-import { View, Text, TextInput, TouchableOpacity, FlatList, ActivityIndicator, Alert, StyleSheet, KeyboardAvoidingView, Platform } from 'react-native';
+import { useState, useRef, useEffect } from 'react';
+import {
+  View, Text, TextInput, TouchableOpacity,
+  FlatList, ActivityIndicator, Alert, StyleSheet,
+  KeyboardAvoidingView, Platform
+} from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useRouter } from 'expo-router';
@@ -8,37 +12,64 @@ import { useRole } from '../hooks/useRole';
 import { submitQuery } from '../services/api';
 
 export default function Dashboard() {
-  const [messages, setMessages] = useState([
-    {
-      id: '0',
-      from: 'bot',
-      text: 'Hello! I am your Maintenance Copilot. Describe a task or equipment issue and I will guide you through it.',
-    },
-  ]);
-  const [inputValue, setInputValue] = useState('');
+  const [chats, setChats]               = useState([{ id: '1', messages: [] }]);
+  const [activeChatId, setActiveChatId] = useState('1');
+  const [inputValue, setInputValue]     = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
-  const flatListRef = useRef(null);
-  const router = useRouter();
-
+  const [showSidebar, setShowSidebar]   = useState(false);
+  const [loaded, setLoaded]             = useState(false);
+  const flatListRef                     = useRef(null);
+  const router                          = useRouter();
   const { role, isJunior, isIntermediate } = useRole();
 
-  const placeholder = isJunior
-    ? "Describe what needs fixing..."
-    : 'Enter a maintenance task or equipment issue...';
+  const activeChat = chats.find(c => c.id === activeChatId);
+  const messages   = activeChat?.messages || [];
+  const isEmpty    = messages.length === 0;
 
-  const addMessage = (from, text, extra = {}) => {
-    const msg = { id: Date.now().toString(), from, text, ...extra };
-    setMessages(prev => [...prev, msg]);
+  // Load chats for this role from AsyncStorage
+  useEffect(() => {
+    if (!role) return;
+    const loadChats = async () => {
+      try {
+        const raw = await AsyncStorage.getItem(`chats_${role}`);
+        if (raw) {
+          const saved = JSON.parse(raw);
+          if (saved.length > 0) {
+            setChats(saved);
+            setActiveChatId(saved[0].id);
+          }
+        }
+      } catch (e) {
+        console.log('Error loading chats:', e);
+      }
+      setLoaded(true);
+    };
+    loadChats();
+  }, [role]);
+
+  // Save chats for this role to AsyncStorage whenever chats change
+  useEffect(() => {
+    if (!role || !loaded) return;
+    AsyncStorage.setItem(`chats_${role}`, JSON.stringify(chats)).catch(e =>
+      console.log('Error saving chats:', e)
+    );
+  }, [chats, role, loaded]);
+
+  const addMessage = (from, text) => {
+    const msg = { id: Date.now().toString() + Math.random(), from, text };
+    setChats(prev => prev.map(c =>
+      c.id === activeChatId
+        ? { ...c, messages: [...c.messages, msg] }
+        : c
+    ));
     setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 100);
-    return msg;
   };
 
-  const handleSend = async () => {
-    if (!inputValue.trim() || isProcessing) return;
-    const queryText = inputValue.trim();
+  const handleSend = async (overrideText) => {
+    const queryText = (overrideText || inputValue).trim();
+    if (!queryText || isProcessing) return;
     setInputValue('');
 
-    // Save to history
     const raw = await AsyncStorage.getItem('queryHistory');
     const existing = JSON.parse(raw || '[]');
     await AsyncStorage.setItem('queryHistory', JSON.stringify(
@@ -50,45 +81,64 @@ export default function Dashboard() {
 
     try {
       const result = await submitQuery(queryText);
-      addMessage('bot', result.text, { sources: result.sources, reasoning: result.reasoning, isRecommendation: true });
+      addMessage('bot', result.text);
     } catch {
       await new Promise(r => setTimeout(r, 2000));
-      addMessage('bot', 'Step-by-step disassembly procedure generated.', {
-        sources: [
-          { title: 'FedEx Manual X-1000', page: 42, section: '5.2' },
-          { title: 'OSHA 29 CFR 1910.147', page: 12, section: '3.1' },
-        ],
-        reasoning: 'Retrieved from engine manual; safety validation passed.',
-        isRecommendation: true,
-      });
+      addMessage('bot', '1. Power down the system.\n2. Remove the four bolts on the engine cover using a 10mm socket.\n3. Carefully lift the cover straight up.');
     }
 
     setIsProcessing(false);
   };
 
-  const handleApprove = (id) => {
-    Alert.alert('Approved', '✓ Recommendation approved and logged to audit trail.');
-    setMessages(prev => prev.map(m => m.id === id ? { ...m, resolved: 'approved' } : m));
+  const handleNewChat = () => {
+    const newId = Date.now().toString();
+    setChats(prev => [...prev, { id: newId, messages: [] }]);
+    setActiveChatId(newId);
+    setShowSidebar(false);
+    setInputValue('');
   };
 
-  const handleReject = (id) => {
-    Alert.alert('Rejected', '✗ Recommendation rejected and logged to audit trail.');
-    setMessages(prev => prev.map(m => m.id === id ? { ...m, resolved: 'rejected' } : m));
+  const handleSwitchChat = (id) => {
+    setActiveChatId(id);
+    setShowSidebar(false);
+  };
+
+  const handleDeleteChat = (id) => {
+    if (chats.length === 1) {
+      const fresh = [{ id: '1', messages: [] }];
+      setChats(fresh);
+      setActiveChatId('1');
+      setShowSidebar(false);
+      return;
+    }
+    const remaining = chats.filter(c => c.id !== id);
+    setChats(remaining);
+    if (activeChatId === id) setActiveChatId(remaining[0].id);
+    setShowSidebar(false);
   };
 
   const handleLogout = () => {
     Alert.alert('Logout', 'Are you sure you want to logout?', [
       { text: 'Cancel', style: 'cancel' },
-      { text: 'Logout', style: 'destructive', onPress: async () => {
-        await AsyncStorage.removeItem('user');
-        router.replace('/login');
-      }},
+      {
+        text: 'Logout', style: 'destructive', onPress: async () => {
+          await AsyncStorage.removeItem('user');
+          setChats([{ id: '1', messages: [] }]);
+          setActiveChatId('1');
+          setShowSidebar(false);
+          router.replace('/login');
+        }
+      },
     ]);
+  };
+
+  const getChatTitle = (chat) => {
+    const first = chat.messages.find(m => m.from === 'user');
+    return first ? first.text.slice(0, 30) + (first.text.length > 30 ? '...' : '') : 'New Chat';
   };
 
   const renderMessage = ({ item }) => {
     const isUser = item.from === 'user';
-
     return (
       <View style={[s.msgRow, isUser ? s.msgRowUser : s.msgRowBot]}>
         {!isUser && (
@@ -98,43 +148,12 @@ export default function Dashboard() {
         )}
         <View style={[s.bubble, isUser ? s.bubbleUser : s.bubbleBot]}>
           <Text style={[s.bubbleText, isUser && s.bubbleTextUser]}>{item.text}</Text>
-
-          {/* Sources */}
-          {item.sources?.length > 0 && (
-            <View style={s.sources}>
-              <Text style={s.sourcesLabel}>SOURCES</Text>
-              {item.sources.map((src, i) => (
-                <Text key={i} style={s.sourceItem}>• {src.title} — p.{src.page} §{src.section}</Text>
-              ))}
-            </View>
-          )}
-
-          {/* Reasoning */}
-          {item.reasoning && (
-            <View style={s.reasoning}>
-              <Text style={s.reasoningText}>🧠 {item.reasoning}</Text>
-            </View>
-          )}
-
-          {/* Approve / Reject buttons */}
-          {item.isRecommendation && !item.resolved && (
-            <View style={s.actionRow}>
-              <TouchableOpacity style={s.approveBtn} onPress={() => handleApprove(item.id)}>
-                <Text style={s.approveTxt}>✓ Approve</Text>
-              </TouchableOpacity>
-              <TouchableOpacity style={s.rejectBtn} onPress={() => handleReject(item.id)}>
-                <Text style={s.rejectTxt}>✗ Reject</Text>
-              </TouchableOpacity>
-            </View>
-          )}
-
-          {/* Resolved state */}
-          {item.resolved && (
-            <Text style={[s.resolved, item.resolved === 'approved' ? s.resolvedApproved : s.resolvedRejected]}>
-              {item.resolved === 'approved' ? '✓ Approved' : '✗ Rejected'}
-            </Text>
-          )}
         </View>
+        {isUser && (
+          <View style={s.avatarUser}>
+            <Text style={s.avatarText}>👤</Text>
+          </View>
+        )}
       </View>
     );
   };
@@ -142,18 +161,51 @@ export default function Dashboard() {
   return (
     <SafeAreaView style={s.safe}>
 
+      {/* Sidebar overlay */}
+      {showSidebar && (
+        <View style={s.overlay}>
+          <TouchableOpacity style={s.overlayBg} onPress={() => setShowSidebar(false)} />
+          <View style={s.sidebar}>
+            <Text style={s.sidebarTitle}>Chats</Text>
+            <TouchableOpacity style={s.newChatBtn} onPress={handleNewChat}>
+              <Text style={s.newChatText}>+ New Chat</Text>
+            </TouchableOpacity>
+            <FlatList
+              data={[...chats].reverse()}
+              keyExtractor={c => c.id}
+              renderItem={({ item }) => (
+                <View style={[s.chatItem, item.id === activeChatId && s.chatItemActive]}>
+                  <TouchableOpacity style={{ flex: 1 }} onPress={() => handleSwitchChat(item.id)}>
+                    <Text style={s.chatItemText} numberOfLines={1}>{getChatTitle(item)}</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity onPress={() => handleDeleteChat(item.id)}>
+                    <Text style={s.deleteText}>🗑</Text>
+                  </TouchableOpacity>
+                </View>
+              )}
+            />
+            <TouchableOpacity style={s.logoutSidebar} onPress={handleLogout}>
+              <Text style={s.logoutSidebarText}>Logout</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      )}
+
       {/* Header */}
       <View style={s.header}>
-        <View>
+        <TouchableOpacity style={s.menuBtn} onPress={() => setShowSidebar(true)}>
+          <Text style={s.menuIcon}>☰</Text>
+        </TouchableOpacity>
+        <View style={{ flex: 1, alignItems: 'center' }}>
           <Text style={s.headerTitle}>Maintenance Copilot</Text>
           <Text style={s.headerRole}>{role?.toUpperCase()} ACCESS</Text>
         </View>
-        <TouchableOpacity style={s.logoutBtn} onPress={handleLogout}>
-          <Text style={s.logoutText}>Logout</Text>
+        <TouchableOpacity style={s.newChatIconBtn} onPress={handleNewChat}>
+          <Text style={s.newChatIcon}>✏️</Text>
         </TouchableOpacity>
       </View>
 
-      {/* Role banner */}
+      {/* Role banners */}
       {isJunior && (
         <View style={[s.banner, { borderColor: C.blue, backgroundColor: C.blueBg }]}>
           <Text style={[s.bannerText, { color: C.blue }]}>
@@ -169,44 +221,60 @@ export default function Dashboard() {
         </View>
       )}
 
-      {/* Messages */}
-      <FlatList
-        ref={flatListRef}
-        data={messages}
-        keyExtractor={item => item.id}
-        renderItem={renderMessage}
-        contentContainerStyle={s.msgList}
-        onContentSizeChange={() => flatListRef.current?.scrollToEnd({ animated: true })}
-      />
-
-      {/* Typing indicator */}
-      {isProcessing && (
-        <View style={s.typingRow}>
-          <View style={s.avatar}>
-            <Text style={s.avatarText}>⚡</Text>
+      <KeyboardAvoidingView
+        style={{ flex: 1 }}
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+      >
+        {/* Welcome screen */}
+        {isEmpty ? (
+          <View style={s.welcomeContainer}>
+            <View style={s.logoCircle}>
+              <Text style={s.logoIcon}>⚡</Text>
+            </View>
+            <Text style={s.welcomeTitle}>Maintenance Copilot</Text>
+            <Text style={s.welcomeSub}>Your AI-powered maintenance assistant.</Text>
+            <Text style={s.welcomeSub2}>Ask me anything about equipment, procedures, or safety.</Text>
           </View>
-          <View style={s.typingBubble}>
-            <ActivityIndicator size="small" color={C.primary} />
-            <Text style={s.typingText}>Analyzing...</Text>
-          </View>
-        </View>
-      )}
+        ) : (
+          <FlatList
+            ref={flatListRef}
+            data={messages}
+            keyExtractor={item => item.id}
+            renderItem={renderMessage}
+            contentContainerStyle={s.msgList}
+            onContentSizeChange={() => flatListRef.current?.scrollToEnd({ animated: true })}
+            keyboardShouldPersistTaps="handled"
+          />
+        )}
 
-      {/* Input bar */}
-      <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+        {/* Typing indicator */}
+        {isProcessing && (
+          <View style={s.typingRow}>
+            <View style={s.avatar}>
+              <Text style={s.avatarText}>⚡</Text>
+            </View>
+            <View style={s.typingBubble}>
+              <ActivityIndicator size="small" color={C.primary} />
+              <Text style={s.typingText}>Analyzing...</Text>
+            </View>
+          </View>
+        )}
+
+        {/* Input bar */}
         <View style={s.inputBar}>
           <TextInput
             style={s.input}
-            placeholder={placeholder}
+            placeholder="Ask a maintenance question..."
             placeholderTextColor={C.textMuted}
             value={inputValue}
             onChangeText={setInputValue}
             multiline
             editable={!isProcessing}
+            onFocus={() => setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 300)}
           />
           <TouchableOpacity
             style={[s.sendBtn, (!inputValue.trim() || isProcessing) && s.sendBtnDisabled]}
-            onPress={handleSend}
+            onPress={() => handleSend()}
             disabled={!inputValue.trim() || isProcessing}
           >
             <Text style={s.sendBtnText}>Send</Text>
@@ -220,43 +288,51 @@ export default function Dashboard() {
 
 const s = StyleSheet.create({
   safe:               { flex: 1, backgroundColor: C.bg },
-  header:             { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 16, paddingVertical: 12, borderBottomWidth: 1, borderColor: C.cardBorder, backgroundColor: C.card },
+  overlay:            { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, zIndex: 100, flexDirection: 'row' },
+  overlayBg:          { flex: 1, backgroundColor: 'rgba(0,0,0,0.4)' },
+  sidebar:            { width: 280, backgroundColor: C.card, paddingTop: 50, paddingHorizontal: 16, paddingBottom: 20 },
+  sidebarTitle:       { color: C.text, fontSize: 18, fontWeight: '700', marginBottom: 16 },
+  newChatBtn:         { backgroundColor: C.primary, borderRadius: 12, paddingVertical: 12, alignItems: 'center', marginBottom: 16 },
+  newChatText:        { color: '#fff', fontWeight: '700', fontSize: 14 },
+  chatItem:           { flexDirection: 'row', alignItems: 'center', paddingVertical: 12, paddingHorizontal: 12, borderRadius: 10, marginBottom: 6, backgroundColor: C.bg },
+  chatItemActive:     { backgroundColor: C.primaryLight },
+  chatItemText:       { color: C.text, fontSize: 13, flex: 1 },
+  deleteText:         { fontSize: 16, marginLeft: 8 },
+  logoutSidebar:      { marginTop: 'auto', borderWidth: 1, borderColor: '#fecaca', backgroundColor: C.redBg, borderRadius: 10, paddingVertical: 12, alignItems: 'center' },
+  logoutSidebarText:  { color: C.red, fontWeight: '700', fontSize: 13 },
+  header:             { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 12, paddingVertical: 12, borderBottomWidth: 1, borderColor: C.cardBorder, backgroundColor: C.card },
+  menuBtn:            { padding: 6 },
+  menuIcon:           { fontSize: 20, color: C.text },
   headerTitle:        { color: C.text, fontWeight: '700', fontSize: 16 },
-  headerRole:         { color: C.primary, fontSize: 10, fontWeight: '700', marginTop: 2 },
-  logoutBtn:          { borderWidth: 1, borderColor: '#fecaca', backgroundColor: C.redBg, borderRadius: 10, paddingHorizontal: 12, paddingVertical: 5 },
-  logoutText:         { color: C.red, fontSize: 11, fontWeight: '700' },
-  banner:             { borderWidth: 1, borderRadius: 0, padding: 10, marginHorizontal: 0 },
+  headerRole:         { color: C.primary, fontSize: 10, fontWeight: '700', marginTop: 1 },
+  newChatIconBtn:     { padding: 6 },
+  newChatIcon:        { fontSize: 20 },
+  banner:             { borderWidth: 1, padding: 10 },
   bannerText:         { fontSize: 11, lineHeight: 16, paddingHorizontal: 16 },
-  msgList:            { padding: 16, paddingBottom: 8 },
-  msgRow:             { flexDirection: 'row', marginBottom: 12, alignItems: 'flex-end' },
+  welcomeContainer:   { flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 24, paddingBottom: 40 },
+  logoCircle:         { width: 80, height: 80, borderRadius: 40, backgroundColor: C.primaryLight, alignItems: 'center', justifyContent: 'center', marginBottom: 16 },
+  logoIcon:           { fontSize: 36 },
+  welcomeTitle:       { color: C.text, fontSize: 22, fontWeight: '700', marginBottom: 8 },
+  welcomeSub:         { color: C.textSub, fontSize: 14, textAlign: 'center', marginBottom: 4 },
+  welcomeSub2:        { color: C.textMuted, fontSize: 12, textAlign: 'center' },
+  msgList:            { padding: 16, paddingBottom: 12 },
+  msgRow:             { flexDirection: 'row', marginBottom: 14, alignItems: 'flex-end' },
   msgRowUser:         { justifyContent: 'flex-end' },
   msgRowBot:          { justifyContent: 'flex-start' },
   avatar:             { width: 30, height: 30, borderRadius: 15, backgroundColor: C.primaryLight, alignItems: 'center', justifyContent: 'center', marginRight: 8 },
+  avatarUser:         { width: 30, height: 30, borderRadius: 15, backgroundColor: C.primaryLight, alignItems: 'center', justifyContent: 'center', marginLeft: 8 },
   avatarText:         { fontSize: 14 },
-  bubble:             { maxWidth: '80%', borderRadius: 16, padding: 12 },
+  bubble:             { maxWidth: '75%', borderRadius: 18, padding: 12 },
   bubbleUser:         { backgroundColor: C.primary, borderBottomRightRadius: 4 },
   bubbleBot:          { backgroundColor: C.card, borderWidth: 1, borderColor: C.cardBorder, borderBottomLeftRadius: 4 },
-  bubbleText:         { color: C.text, fontSize: 13, lineHeight: 19 },
+  bubbleText:         { color: C.text, fontSize: 14, lineHeight: 20 },
   bubbleTextUser:     { color: '#fff' },
-  sources:            { marginTop: 10, paddingTop: 8, borderTopWidth: 1, borderColor: C.cardBorder },
-  sourcesLabel:       { color: C.textMuted, fontSize: 9, fontWeight: '700', letterSpacing: 1, marginBottom: 4 },
-  sourceItem:         { color: C.textSub, fontSize: 11, marginBottom: 2 },
-  reasoning:          { marginTop: 8, backgroundColor: C.primaryLight, borderRadius: 8, padding: 8 },
-  reasoningText:      { color: C.primaryText, fontSize: 11 },
-  actionRow:          { flexDirection: 'row', gap: 8, marginTop: 10 },
-  approveBtn:         { flex: 1, backgroundColor: '#dcfce7', borderWidth: 1, borderColor: '#86efac', borderRadius: 8, paddingVertical: 8, alignItems: 'center' },
-  approveTxt:         { color: '#16a34a', fontWeight: '700', fontSize: 12 },
-  rejectBtn:          { flex: 1, backgroundColor: C.redBg, borderWidth: 1, borderColor: '#fca5a5', borderRadius: 8, paddingVertical: 8, alignItems: 'center' },
-  rejectTxt:          { color: C.red, fontWeight: '700', fontSize: 12 },
-  resolved:           { marginTop: 8, fontSize: 11, fontWeight: '700', textAlign: 'center' },
-  resolvedApproved:   { color: '#16a34a' },
-  resolvedRejected:   { color: C.red },
-  typingRow:          { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16, paddingBottom: 4 },
+  typingRow:          { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16, paddingBottom: 8 },
   typingBubble:       { flexDirection: 'row', alignItems: 'center', backgroundColor: C.card, borderRadius: 16, padding: 10, gap: 8, borderWidth: 1, borderColor: C.cardBorder },
   typingText:         { color: C.textMuted, fontSize: 12 },
   inputBar:           { flexDirection: 'row', alignItems: 'flex-end', padding: 12, borderTopWidth: 1, borderColor: C.cardBorder, backgroundColor: C.card, gap: 8 },
-  input:              { flex: 1, backgroundColor: C.inputBg, color: C.text, borderRadius: 20, borderWidth: 1, borderColor: C.inputBorder, paddingHorizontal: 16, paddingVertical: 10, fontSize: 13, maxHeight: 100 },
-  sendBtn:            { backgroundColor: C.primary, borderRadius: 20, paddingHorizontal: 18, paddingVertical: 10 },
+  input:              { flex: 1, backgroundColor: C.inputBg, color: C.text, borderRadius: 20, borderWidth: 1, borderColor: C.inputBorder, paddingHorizontal: 16, paddingVertical: 10, fontSize: 14, maxHeight: 120 },
+  sendBtn:            { backgroundColor: C.primary, borderRadius: 20, paddingHorizontal: 18, paddingVertical: 10, marginBottom: 2 },
   sendBtnDisabled:    { backgroundColor: '#c4b5fd' },
-  sendBtnText:        { color: '#fff', fontWeight: '700', fontSize: 13 },
+  sendBtnText:        { color: '#fff', fontWeight: '700', fontSize: 14 },
 });

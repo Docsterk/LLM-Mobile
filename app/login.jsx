@@ -1,9 +1,16 @@
 import { useState } from 'react';
-import { View, Text, TextInput, TouchableOpacity, ActivityIndicator, StyleSheet } from 'react-native';
+import { View, Text, TextInput, TouchableOpacity, ActivityIndicator, StyleSheet, Alert } from 'react-native';
 import { useRouter } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { C } from './theme';
+
+const USERS = {
+  'admin':        { password: '123', role: 'admin' },
+  'expert':       { password: '123', role: 'expert' },
+  'intermediate': { password: '123', role: 'intermediate' },
+  'beginner':     { password: '123', role: 'beginner' },
+};
 
 export default function Login() {
   const [email, setEmail]       = useState('');
@@ -15,9 +22,17 @@ export default function Login() {
     if (!email || !password) return;
     setLoading(true);
     await new Promise(r => setTimeout(r, 600));
-    const role = email.includes('admin') ? 'admin' : 'expert';
-    await AsyncStorage.setItem('user', JSON.stringify({ email, role }));
-    router.replace(role === 'admin' ? '/admin' : '/dashboard');
+
+    const user = USERS[email.toLowerCase().trim()];
+    if (!user || user.password !== password) {
+      setLoading(false);
+      Alert.alert('Login Failed', 'Invalid username or password.');
+      return;
+    }
+
+    await AsyncStorage.setItem('user', JSON.stringify({ email, role: user.role }));
+    router.replace(user.role === 'admin' ? '/admin' : '/dashboard');
+    setLoading(false);
   };
 
   return (
@@ -29,14 +44,13 @@ export default function Login() {
         <Text style={s.title}>Group 6 Copilot</Text>
         <Text style={s.subtitle}>Maintenance Disassembly Assistant{'\n'}Sign in to continue</Text>
         <View style={s.card}>
-          <Text style={s.label}>EMAIL ADDRESS</Text>
+          <Text style={s.label}>USERNAME</Text>
           <TextInput
             style={s.input}
-            placeholder="your@group6copilot.com"
+            placeholder="admin / expert / intermediate / beginner"
             placeholderTextColor={C.textMuted}
             value={email}
             onChangeText={setEmail}
-            keyboardType="email-address"
             autoCapitalize="none"
           />
           <Text style={s.label}>PASSWORD</Text>
